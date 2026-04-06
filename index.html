@@ -237,6 +237,14 @@
     #hud.on{ display:block; }
     #hud .small{ color: rgba(230,240,255,0.58); }
 
+    #fps-corner{
+      position:fixed; bottom:8px; right:10px;
+      color: #00cc44;
+      font-size:12px; font-family:'OCR A Extended','OCR A','OCRA','Courier New',monospace;
+      letter-spacing:0.05em;
+      pointer-events:none; z-index:10;
+    }
+
     /* ── Combat HUD ─────────────────────────────────────────────── */
     #combat-hud{
       display:none; position:fixed; inset:0;
@@ -425,6 +433,7 @@
   </div>
 
   <div id="hud"></div>
+  <div id="fps-corner">-- fps</div>
 
   <div id="combat-hud">
     <div class="reticle">
@@ -532,9 +541,9 @@ function randSeed(){
 const QUALITY = { AUTO:0, HIGH:1, MED:2, LOW:3 };
 
 const qualityPresets = {
-  [QUALITY.HIGH]: { maxChunks:14, buildingsPerChunk:32, lampsPerChunk:26, dronesPerChunk:11, maxGroundCars:104, maxFlyingCars:900, maxParticles:980 },
-  [QUALITY.MED]:  { maxChunks:12, buildingsPerChunk:22, lampsPerChunk:18, dronesPerChunk:7,  maxGroundCars:82,  maxFlyingCars:700, maxParticles:700 },
-  [QUALITY.LOW]:  { maxChunks:10, buildingsPerChunk:14, lampsPerChunk:12, dronesPerChunk:4,  maxGroundCars:54,  maxFlyingCars:450, maxParticles:420 }
+  [QUALITY.HIGH]: { maxChunks:22, buildingsPerChunk:52, lampsPerChunk:26, dronesPerChunk:11, maxGroundCars:104, maxFlyingCars:1800, maxRobots:900, maxParticles:980 },
+  [QUALITY.MED]:  { maxChunks:18, buildingsPerChunk:36, lampsPerChunk:18, dronesPerChunk:7,  maxGroundCars:82,  maxFlyingCars:1400, maxRobots:700, maxParticles:700 },
+  [QUALITY.LOW]:  { maxChunks:14, buildingsPerChunk:24, lampsPerChunk:12, dronesPerChunk:4,  maxGroundCars:54,  maxFlyingCars:900,  maxRobots:450, maxParticles:420 }
 };
 
 const config = {
@@ -555,6 +564,7 @@ const config = {
 const ui = document.getElementById("ui");
 const hud = document.getElementById("hud");
 const qLabel = document.getElementById("qLabel");
+const fpsCorner = document.getElementById("fps-corner");
 
 function currentPreset(){
   const mode = (config.qualityMode === QUALITY.AUTO) ? config.qualityStep : config.qualityMode;
@@ -656,8 +666,8 @@ function spineSway(z){
 /* =========================
    Three.js setup
 ========================= */
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+const renderer = new THREE.WebGLRenderer({ antialias: false }); // SMAA handles AA in post
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.0));        // 1:1 pixel ratio — post passes are expensive
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.35;
@@ -735,7 +745,7 @@ scene.add(ground);
 /* =========================
    Star field (static points on far sphere)
 ========================= */
-(function buildStars(){
+const _starsMesh = (function buildStars(){
   const N = 3800;
   const pos = new Float32Array(N * 3);
   const col = new Float32Array(N * 3);
@@ -771,8 +781,7 @@ scene.add(ground);
   const stars = new THREE.Points(geo, mat);
   stars.frustumCulled = false;
   scene.add(stars);
-  // Stars follow camera (shift each frame)
-  stars.userData.isStars = true;
+  return stars;
 })();
 
 /* =========================
@@ -862,16 +871,17 @@ const skyDome = (() => {
    — Follows camera XZ each frame (like skyDome).  No windows, no neon.
 ========================= */
 const bgCity = (() => {
-  const COUNT = 480;
-  const geo   = new THREE.PlaneGeometry(1, 1);   // flat billboard — 4 verts vs 36 for a box
+  // 2 fixed-depth rows per arc × 2 arcs = 320 instances
+  const COUNT   = 320;
+  const HALF    = COUNT >> 1;   // 160 per arc
+  const QUARTER = HALF  >> 1;   // 80 per row (near / far) — dense overlap across ~950u arc
+  const geo   = new THREE.PlaneGeometry(1, 1);
 
-  // Front face: near-black, faces camera
   const matFront = new THREE.MeshBasicMaterial({
     color: new THREE.Color(0x07050b),
     side: THREE.DoubleSide,
     fog: true,
   });
-  // Side face: dark violet-gray, perpendicular — gives depth illusion
   const matSide = new THREE.MeshBasicMaterial({
     color: new THREE.Color(0x0e0b13),
     side: THREE.DoubleSide,
@@ -887,35 +897,30 @@ const bgCity = (() => {
     scene.add(m);
   }
 
-  // Deterministic placement — seeded ring of varied silhouettes
   const rng0 = makeRng(hash32(u32(SEED ^ 0xB6C1D9F0)));
   const dummy = new THREE.Object3D();
-
-  // Side arcs only: ±55° around ±X axis, leaving the forward/backward view clear
   const HALF_ARC = 55 * (Math.PI / 180);
-  const HALF = COUNT >> 1;
 
   for(let i = 0; i < COUNT; i++){
-    const localT = (i % HALF) / HALF;
-    const base   = (i < HALF) ? 0 : Math.PI;
-    const angle  = base + (localT * 2 - 1) * HALF_ARC
-                 + (rng0.next() - 0.5) * (HALF_ARC / HALF) * 2;
-    const shell  = (i & 1) ? rng0.next() * 120 + 520 : rng0.next() * 150 + 680;
-    const h  = 18 + Math.pow(rng0.next(), 0.55) * 75;   // 18–93 u tall
-    const w  = 10 + rng0.next() * 28;                    // 10–38 u wide (wider for better coverage)
-    const dv = 5  + rng0.next() * 12;                    // 5–17 u side panel width
+    const base   = (i < HALF) ? 0 : Math.PI;           // left or right arc
+    const isNear = (i % HALF) < QUARTER;
+    const shell  = isNear ? 580 : 760;                  // 2 fixed depth rows
+    const t      = (i % QUARTER) / (QUARTER - 1);      // 0..1 evenly across arc
+    const angle  = base + (t * 2 - 1) * HALF_ARC;
+
+    const h  = 22 + Math.pow(rng0.next(), 0.55) * 80;   // 22–102 u tall
+    const w  = 18 + rng0.next() * 16;                   // 18–34 u wide
+    const dv = 8  + rng0.next() * 14;
     const x  = Math.cos(angle) * shell;
     const z  = Math.sin(angle) * shell;
     const y  = h * 0.5;
 
-    // Front face — lookAt origin makes plane face inward toward camera
     dummy.position.set(x, y, z);
     dummy.scale.set(w, h, 1);
     dummy.lookAt(0, y, 0);
     dummy.updateMatrix();
     bgFront.setMatrixAt(i, dummy.matrix);
 
-    // Side face — same position, rotated 90° → perpendicular depth strip
     dummy.position.set(x, y, z);
     dummy.scale.set(dv, h, 1);
     dummy.lookAt(0, y, 0);
@@ -927,6 +932,73 @@ const bgCity = (() => {
   bgSide.instanceMatrix.needsUpdate  = true;
 
   return { front: bgFront, side: bgSide };
+})();
+
+/* Forward-horizon silhouette ring — cheap 2D planes that follow the camera,
+   always 400–1400 u ahead, giving infinite-city depth with zero chunk cost. */
+const bgFwd = (() => {
+  // 2 fixed-depth rows × 11 planes = 22 instances (was 280)
+  const COUNT   = 22;
+  const PER_ROW = 11;
+  const geo = new THREE.PlaneGeometry(1, 1);
+
+  const matFront = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(0x06040a),
+    side: THREE.DoubleSide,
+    fog: true,
+  });
+  const matSide = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(0x0d0a12),
+    side: THREE.DoubleSide,
+    fog: true,
+  });
+
+  const fwdF = new THREE.InstancedMesh(geo, matFront, COUNT);
+  const fwdS = new THREE.InstancedMesh(geo, matSide,  COUNT);
+  for(const m of [fwdF, fwdS]){
+    m.frustumCulled = false;
+    m.castShadow    = false;
+    m.receiveShadow = false;
+    scene.add(m);
+  }
+
+  const rng0  = makeRng(hash32(u32(SEED ^ 0xD3E4F501)));
+  const dummy = new THREE.Object3D();
+  const ARC    = Math.PI / 2;
+  const SPREAD = 10 * (Math.PI / 180);
+
+  for(let i = 0; i < COUNT; i++){
+    const isNear = i < PER_ROW;
+    const shell  = isNear ? 1900 : 3000;               // 2 fixed depth rows
+    const t      = (i % PER_ROW) / (PER_ROW - 1);     // 0..1 evenly across ±10° arc
+    const angle  = ARC + (t * 2 - 1) * SPREAD;
+
+    const h  = 40 + Math.pow(rng0.next(), 0.40) * 110; // 40–150 u
+    const w  = isNear ? 30 + rng0.next() * 25 : 50 + rng0.next() * 35; // 30–55u near, 50–85u far
+    const dv = 8 + rng0.next() * 16;
+
+    const x = Math.cos(angle) * shell;
+    const z = Math.sin(angle) * shell;
+    const y = h * 0.5;
+
+    dummy.position.set(x, y, z);
+    dummy.scale.set(w, h, 1);
+    dummy.lookAt(0, y, 0);
+    dummy.updateMatrix();
+    fwdF.setMatrixAt(i, dummy.matrix);
+
+    dummy.position.set(x, y, z);
+    dummy.scale.set(dv, h, 1);
+    dummy.lookAt(0, y, 0);
+    dummy.rotateY(Math.PI / 2);
+    dummy.updateMatrix();
+    fwdS.setMatrixAt(i, dummy.matrix);
+  }
+
+  fwdF.instanceMatrix.needsUpdate = true;
+  fwdS.instanceMatrix.needsUpdate = true;
+
+  return { front: fwdF, side: fwdS };
 })();
 
 
@@ -1027,6 +1099,23 @@ function getBuildingMaterial(style, neonArr){
   return mat;
 }
 
+// Pre-computed body colors matching the 5-palette gray shades for vertex coloring
+const _bldBodyRGB = [
+  [0.11, 0.11, 0.12],
+  [0.22, 0.22, 0.24],
+  [0.38, 0.38, 0.40],
+  [0.55, 0.55, 0.57],
+  [0.72, 0.72, 0.74],
+];
+// Single material for merged building body geometry (Lambert = much cheaper than PBR Standard)
+const _bldMergeMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+// Single material for merged neon rectangle caps
+const _capMergeMat = new THREE.LineBasicMaterial({ vertexColors: true });
+// Single material for cylinder buildings (Lambert, neutral dark gray)
+const _bldCylMat = new THREE.MeshLambertMaterial({ color: new THREE.Color(0.22, 0.22, 0.24) });
+// Shared pole material — all lamp poles across all chunks, never disposed
+const _lampPoleMat = new THREE.MeshLambertMaterial({ color: new THREE.Color(0.16, 0.16, 0.16) });
+
 // Neon frame line material — cached per neon colour.
 // LineBasicMaterial outputs its colour directly into the HDR buffer, so
 // multiplying by 5 makes it well above the bloom threshold (0.25).
@@ -1070,6 +1159,39 @@ function makeFramePolygon(r, n){
   return geo;
 }
 
+// Add box geometry to a batch collector (for merged building bodies)
+// C = { bPos, bCol, bIdx, bv } arrays
+function _batchBox(C, cx, cy, cz, w, h, d, r, g, b){
+  const hw=w*.5, hh=h*.5, hd=d*.5, v0=C.bv;
+  C.bPos.push(
+    cx-hw,cy-hh,cz-hd, cx+hw,cy-hh,cz-hd, cx+hw,cy+hh,cz-hd, cx-hw,cy+hh,cz-hd,
+    cx-hw,cy-hh,cz+hd, cx+hw,cy-hh,cz+hd, cx+hw,cy+hh,cz+hd, cx-hw,cy+hh,cz+hd
+  );
+  for(let i=0;i<8;i++) C.bCol.push(r,g,b);
+  C.bIdx.push(
+    v0,v0+2,v0+1, v0,v0+3,v0+2,
+    v0+5,v0+7,v0+4, v0+5,v0+6,v0+7,
+    v0+4,v0+3,v0, v0+4,v0+7,v0+3,
+    v0+1,v0+6,v0+5, v0+1,v0+2,v0+6,
+    v0+4,v0+1,v0+5, v0+4,v0,v0+1,
+    v0+3,v0+6,v0+2, v0+3,v0+7,v0+6
+  );
+  C.bv+=8;
+}
+
+// Add a rectangle neon cap (4 line segments) to the cap batch collector
+// C = { lPos, lCol }
+function _batchCapRect(C, x, y, bz, w, d, nr, ng, nb){
+  const hw=(w+0.4)*.5, hd=(d+0.4)*.5;
+  C.lPos.push(
+    x-hw,y,bz-hd, x+hw,y,bz-hd,
+    x+hw,y,bz-hd, x+hw,y,bz+hd,
+    x+hw,y,bz+hd, x-hw,y,bz+hd,
+    x-hw,y,bz+hd, x-hw,y,bz-hd
+  );
+  for(let i=0;i<8;i++) C.lCol.push(nr,ng,nb);
+}
+
 // Shared sidewalk concrete material.
 const _swMat = new THREE.MeshStandardMaterial({
   color:    new THREE.Color(0x3a3a40),   // mid-dark concrete — clearly lighter than ground
@@ -1079,6 +1201,34 @@ const _swMat = new THREE.MeshStandardMaterial({
   emissiveIntensity: 1.0,
 });
 
+// Shared sidewalk equipment materials — fixed palette, never disposed
+const _swEquipMats = [
+  new THREE.MeshStandardMaterial({ color: new THREE.Color(0.14, 0.14, 0.148), roughness: 0.92, metalness: 0.05 }),
+  new THREE.MeshStandardMaterial({ color: new THREE.Color(0.20, 0.20, 0.210), roughness: 0.90, metalness: 0.08 }),
+  new THREE.MeshStandardMaterial({ color: new THREE.Color(0.28, 0.28, 0.294), roughness: 0.88, metalness: 0.12 }),
+  new THREE.MeshStandardMaterial({ color: new THREE.Color(0.36, 0.36, 0.378), roughness: 0.85, metalness: 0.16 }),
+];
+
+// Shared ground panel materials — MeshBasicMaterial, no lighting, fog-aware
+const _panelMats = [
+  new THREE.MeshBasicMaterial({ color: 0x0e0e16, fog: true }),  // dark charcoal
+  new THREE.MeshBasicMaterial({ color: 0x180d0d, fog: true }),  // rust-dark
+  new THREE.MeshBasicMaterial({ color: 0x0a0f18, fog: true }),  // dark steel
+  new THREE.MeshBasicMaterial({ color: 0x111111, fog: true }),  // matte black concrete
+  new THREE.MeshBasicMaterial({ color: 0x0c1108, fog: true }),  // dark industrial green
+];
+// Pre-extracted RGB for vertex-color merge (avoids per-panel material switching)
+const _panelColors = _panelMats.map(m => [m.color.r, m.color.g, m.color.b]);
+// Single shared material for merged panel geometry
+const _panelMergeMat = new THREE.MeshBasicMaterial({ vertexColors: true, fog: true });
+const _cubeColors = [
+  new THREE.Color(0.04, 0.04, 0.05),
+  new THREE.Color(0.06, 0.06, 0.07),
+  new THREE.Color(0.09, 0.09, 0.10),
+  new THREE.Color(0.12, 0.12, 0.13),
+  new THREE.Color(0.15, 0.15, 0.16),
+];
+
 // Single shared window material.
 // MeshBasicMaterial outputs vertex colours directly as pixel colour — no lighting math,
 // no albedo multiplication. Vertex colour IS the emissive output, bloom works correctly.
@@ -1087,6 +1237,9 @@ const _winMat = new THREE.MeshBasicMaterial({
   side: THREE.DoubleSide,
   fog: true,
 });
+
+// Shared lamp-head material — vertex colour carries the neon tint, bloom picks it up.
+const _lampHeadMat = new THREE.MeshBasicMaterial({ vertexColors: true, fog: true });
 
 // 6-entry palette of realistic city-night window tints
 const WIN_TINTS = [
@@ -1127,7 +1280,7 @@ function generateChunk(ch){
   const district = clamp((fbm1D(zMid * 0.0008 + 2.0, SEED ^ 0x55AA77CC) + 1) * 0.5, 0, 1);
   const density = lerp(0.65, 1.2, district);
   const targetBuildings = Math.max(18, Math.floor(preset.buildingsPerChunk * density));
-  let attempts = targetBuildings * 3;
+  let attempts = targetBuildings * 5;
 
   function roadClear(x,z, pad){
     const c = spineX(z);
@@ -1258,6 +1411,47 @@ function generateChunk(ch){
     }
   }
 
+  // ── Outer row: no gaps, average-to-tall procedural buildings only (no reactors) ──
+  {
+    const orng = makeRng(hash32(u32(SEED ^ u32(ch.id * 4919 + 77))));
+    for(let side = -1; side <= 1; side += 2){
+      let zCursor = ch.z0;
+      while(zCursor < ch.z1){
+        const dStep = orng.range(22, 55);
+        zCursor += dStep;
+        const z = zCursor - dStep * 0.5;
+        if(z <= ch.z0 + 4 || z >= ch.z1 - 4) continue;
+        const w  = orng.range(14, 38);
+        const d  = orng.range(14, 38);
+        const cx = spineX(z);
+        const dist = orng.range(170, 250);
+        const x  = cx + side * (dist + w * 0.5);
+        if(Math.abs(x) > WORLD.cityHalfW - 8) continue;
+        const winSeed = orng.nextU32();
+
+        // Always a building — average to tall, no reactors (glbIdx: -1)
+        const h  = lerp(55, 210, Math.pow(orng.next(), 0.45));
+        const sr = orng.next();
+        const shapeType = sr < 0.45 ? 2 : sr < 0.60 ? 1 : sr < 0.68 ? 0
+                        : sr < 0.74 ? 4 : sr < 0.80 ? 13 : sr < 0.86 ? 26
+                        : sr < 0.91 ? 25 : sr < 0.95 ? 31 : 22;
+        const sbRng      = makeRng(winSeed ^ 0xBEEF1234);
+        const hasSetback = h > 120 && sbRng.next() < 0.55;
+        const sbY1       = hasSetback ? h * sbRng.range(0.45, 0.65) : h;
+        const sbDX       = hasSetback ? w * sbRng.range(0.10, 0.20) : 0;
+        const sbDZ       = hasSetback ? d * sbRng.range(0.08, 0.16) : 0;
+        ch.buildings.push({
+          x, z, w, d, h, glbIdx: -1,
+          style: orng.irange(0, 4), neonCol: neon[orng.irange(0, neon.length - 1)], winSeed,
+          shapeType,
+          hasSetback, sbY1, sbDX, sbDZ,
+          hasSetback2: false, sbY2: h, sbDX2: 0, sbDZ2: 0,
+          zKey: z,
+        });
+      }
+    }
+  }
+
   // Lamps
   const targetLamps = Math.max(6, Math.floor(preset.lampsPerChunk * lerp(0.75, 1.15, district)));
   for(let i=0;i<targetLamps;i++){
@@ -1265,8 +1459,8 @@ function generateChunk(ch){
     const c = spineX(z);
     const side = (cr.next() < 0.5) ? -1 : 1;
     const x = c + side * (WORLD.roadWidth*0.5 + WORLD.sidewalk + cr.range(18, 24));
-    const y = cr.range(4, 7);
-    const top = y + cr.range(6, 11);
+    const y = 0;
+    const top = y + cr.range(4, 12);
     const col = cr.next() < 0.25 ? neon[4] : (cr.next() < 0.5 ? neon[0] : neon[2]);
     ch.lamps.push({ x, y, top, z, col, zKey: z });
   }
@@ -1352,16 +1546,11 @@ function createSidewalkMeshes(ch){
       const bw   = brng.range(0.4, 1.8);
       const bd   = brng.range(0.4, 1.8);
       const bh   = brng.range(0.3, 1.4);
-      const gray = 0.12 + brng.next() * 0.30;
-      const bmat = new THREE.MeshStandardMaterial({
-        color:     new THREE.Color(gray, gray, gray * 1.05),
-        roughness: 0.88 + brng.next() * 0.08,
-        metalness: brng.next() * 0.12,
-      });
+      const bmat = _swEquipMats[brng.irange(0, _swEquipMats.length - 1)];
       const bg = new THREE.BoxGeometry(bw, bh, bd);
       const bm = new THREE.Mesh(bg, bmat);
       bm.position.set(bx, Y + bh * 0.5, bz);
-      bm.userData.ownsMaterial = true;
+      bm.userData.ownsMaterial = false;
       bm.frustumCulled = true;
       scene.add(bm);
       ch._meshes.push(bm);
@@ -1376,18 +1565,13 @@ function createSidewalkMeshes(ch){
       const mz  = mrng.range(ch.z0 + 5, ch.z1 - 5);
       const cx  = spineX(mz);
       const mx  = cx + side * mrng.range(inner2 + 1, outer2 - 2);
-      const gray = 0.18 + mrng.next() * 0.25;
-      const mmat = new THREE.MeshStandardMaterial({
-        color:     new THREE.Color(gray, gray * 0.98, gray * 1.03),
-        roughness: 0.80 + mrng.next() * 0.12,
-        metalness: 0.05 + mrng.next() * 0.20,
-      });
+      const mmat = _swEquipMats[mrng.irange(0, _swEquipMats.length - 1)];
 
       function addPart(ox, oz, pw, ph, pd, isTop){
         const g = new THREE.BoxGeometry(pw, ph, pd);
         const m = new THREE.Mesh(g, mmat);
         m.position.set(mx + ox, Y + ph * 0.5 + (isTop ? ph * 0.5 + mrng.range(0.4, 1.2) : 0), mz + oz);
-        m.userData.ownsMaterial = true;
+        m.userData.ownsMaterial = false;
         m.frustumCulled = true;
         scene.add(m); ch._meshes.push(m);
         return ph;
@@ -1405,7 +1589,7 @@ function createSidewalkMeshes(ch){
         const g2 = new THREE.BoxGeometry(tw, th, td);
         const m2 = new THREE.Mesh(g2, mmat);
         m2.position.set(mx + tox, Y + bh + th * 0.5, mz + toz);
-        m2.userData.ownsMaterial = true;
+        m2.userData.ownsMaterial = false;
         m2.frustumCulled = true;
         scene.add(m2); ch._meshes.push(m2);
       }
@@ -1423,7 +1607,7 @@ function createSidewalkMeshes(ch){
           cm.rotation.z = Math.PI * 0.5;
           cm.position.set(mx + cox, Y + cr_ + 0.3, mz);
         }
-        cm.userData.ownsMaterial = true;
+        cm.userData.ownsMaterial = false;
         cm.frustumCulled = true;
         scene.add(cm); ch._meshes.push(cm);
       }
@@ -1431,31 +1615,181 @@ function createSidewalkMeshes(ch){
   }
 }
 
+function createGroundDecals(ch){
+  const rng  = makeRng(hash32(u32(SEED ^ u32(ch.id * 8191 + 43))));
+  const dummy = new THREE.Object3D();
+
+  // ── Flat ground panels — merged into ONE draw call per chunk ─────────────
+  // All 80 quads baked into a single BufferGeometry with vertex colours.
+  const PANELS = 40;
+  const pPos = [], pCol = [], pIdx = [];
+  let pv = 0;
+  for(let side = -1; side <= 1; side += 2){
+    for(let i = 0; i < PANELS; i++){
+      const z  = rng.range(ch.z0 + 1, ch.z1 - 1);
+      const cx = spineX(z);
+      const x  = cx + side * rng.range(42, 252);
+      if(Math.abs(x) > WORLD.cityHalfW - 4) continue;
+      const pw = rng.range(4, 20);
+      const pd = rng.range(3, 15);
+      const [r,g,b] = _panelColors[rng.irange(0, _panelColors.length - 1)];
+      const x0 = x - pw*0.5, x1 = x + pw*0.5;
+      const z0 = z - pd*0.5, z1 = z + pd*0.5;
+      pPos.push(x0,0.05,z0, x1,0.05,z0, x1,0.05,z1, x0,0.05,z1);
+      pCol.push(r,g,b, r,g,b, r,g,b, r,g,b);
+      pIdx.push(pv,pv+1,pv+2, pv,pv+2,pv+3);
+      pv += 4;
+    }
+  }
+  if(pv > 0){
+    const pg = new THREE.BufferGeometry();
+    pg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pPos), 3));
+    pg.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(pCol), 3));
+    pg.setIndex(pIdx);
+    const pm = new THREE.Mesh(pg, _panelMergeMat);
+    pm.frustumCulled = true;
+    scene.add(pm);
+    ch._meshes.push(pm);
+  }
+
+  // ── Small industrial cubes (InstancedMesh) ────────────────────────────────
+  // Dense scattering of tiny boxes (0.3–2.2 u tall) — gives the ground the
+  // visual complexity of a circuit board or industrial yard when viewed from above.
+  const BOX_COUNT = 45;
+  const boxGeo  = new THREE.BoxGeometry(1, 1, 1);
+  // White base + per-instance color = same 5-step palette as buildings, one draw call
+  const boxMat  = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: true });
+  const boxInst = new THREE.InstancedMesh(boxGeo, boxMat, BOX_COUNT * 2);
+  boxInst.frustumCulled = false;
+  boxInst.castShadow = false;
+  boxInst.receiveShadow = false;
+  // _cubeColors defined once at module level (below _panelMats)
+  let boxIdx = 0;
+  for(let side = -1; side <= 1; side += 2){
+    for(let i = 0; i < BOX_COUNT; i++){
+      const z    = rng.range(ch.z0 + 1, ch.z1 - 1);
+      const cx   = spineX(z);
+      const dist = rng.range(42, 252);
+      const x    = cx + side * dist;
+      if(Math.abs(x) > WORLD.cityHalfW - 3) continue;
+      const bh = rng.range(0.08, 0.55);               // very flat plate
+      // X-width capped so near-road plates never stretch into the inner row (~40u)
+      const maxBW = Math.max(2, 2 * (dist - 40));
+      const bw = rng.range(6, Math.min(55, maxBW));   // road-axis width, capped near road
+      const bd = rng.range(8, 60);                    // Z-axis (along road) unconstrained
+      dummy.position.set(x, bh * 0.5, z);
+      dummy.scale.set(bw, bh, bd);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      boxInst.setMatrixAt(boxIdx, dummy.matrix);
+      boxInst.setColorAt(boxIdx, _cubeColors[rng.irange(0, _cubeColors.length - 1)]);
+      boxIdx++;
+    }
+  }
+  boxInst.count = boxIdx;
+  boxInst.instanceMatrix.needsUpdate = true;
+  if(boxInst.instanceColor) boxInst.instanceColor.needsUpdate = true;
+  scene.add(boxInst);
+  ch._meshes.push(boxInst);
+
+}
+
 function createChunkMeshes(ch){
   ch._meshes = [];
   createSidewalkMeshes(ch);
+  createGroundDecals(ch);
+
+  // Per-chunk geometry collector for batched building + lamp meshes
+  const _bC = {
+    bPos:[], bCol:[], bIdx:[], bv:0,   // body boxes (buildings only — lamp poles are separate)
+    lPos:[], lCol:[],                   // neon cap lines
+    wPos:[], wCol:[], wIdx:[], wv:0,    // windows
+    hPos:[], hCol:[], hIdx:[], hv:0,   // lamp heads (neon vertex colour)
+    plPos:[], plIdx:[], plv:0,         // lamp poles (vertex positions only, no vertex colour)
+  };
 
   for(const b of ch.buildings){
     if(b.glbIdx >= 0){
       placeBuildingGlb(b, ch);
     } else {
-      createBuildingMeshes(b, ch);
+      createBuildingMeshes(b, ch, _bC);
     }
   }
 
-  for(const lm of ch.lamps){
-    createLampMesh(lm, ch);
+  for(const lm of ch.lamps) createLampMesh(lm, ch, _bC);
+
+  // Flush body geometry → 1 mesh
+  if(_bC.bv > 0){
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(_bC.bPos), 3));
+    geo.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(_bC.bCol), 3));
+    geo.setIndex(_bC.bIdx);
+    geo.computeVertexNormals();
+    const m = new THREE.Mesh(geo, _bldMergeMat);
+    m.frustumCulled = true;
+    scene.add(m); ch._meshes.push(m);
+  }
+
+  // Flush cap lines → 1 LineSegments
+  if(_bC.lPos.length > 0){
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(_bC.lPos), 3));
+    geo.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(_bC.lCol), 3));
+    const m = new THREE.LineSegments(geo, _capMergeMat);
+    m.frustumCulled = true;
+    scene.add(m); ch._meshes.push(m);
+  }
+
+  // Flush windows → 1 mesh
+  if(_bC.wv > 0){
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(_bC.wPos), 3));
+    geo.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(_bC.wCol), 3));
+    geo.setIndex(_bC.wIdx);
+    const m = new THREE.Mesh(geo, _winMat);
+    m.frustumCulled = true;
+    scene.add(m); ch._meshes.push(m);
+  }
+
+  // Flush lamp poles → 1 mesh per chunk (separate from building body, shared dark material)
+  if(_bC.plv > 0){
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(_bC.plPos), 3));
+    geo.setIndex(_bC.plIdx);
+    geo.computeVertexNormals();
+    const m = new THREE.Mesh(geo, _lampPoleMat);
+    m.frustumCulled = true;
+    scene.add(m); ch._meshes.push(m);
+  }
+
+  // Flush lamp heads → 1 mesh per chunk
+  if(_bC.hv > 0){
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(_bC.hPos), 3));
+    geo.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(_bC.hCol), 3));
+    geo.setIndex(_bC.hIdx);
+    const m = new THREE.Mesh(geo, _lampHeadMat);
+    m.frustumCulled = true;
+    scene.add(m); ch._meshes.push(m);
   }
 
   for(const dr of ch.drones){
     createDroneMesh(dr, ch);
+  }
+
+  // Freeze local→world matrix on every static chunk mesh.
+  // Three.js recomputes this for ALL scene objects every frame by default;
+  // static geometry never moves so this is pure waste.
+  for(const m of ch._meshes){
+    m.updateMatrix();
+    m.matrixAutoUpdate = false;
   }
 }
 
 /* =========================
    Procedural window generation
 ========================= */
-function buildTierWindows(b, ch, tierX, tierY0, tierY1, tierW, tierD){
+function buildTierWindows(b, ch, tierX, tierY0, tierY1, tierW, tierD, wCol){
   const tierH = tierY1 - tierY0;
   if(tierH < 5) return;
 
@@ -1498,6 +1832,10 @@ function buildTierWindows(b, ch, tierX, tierY0, tierY1, tierW, tierD){
 
   // 4 faces: front/back normals ±Z, left/right normals ±X
   // fu0→fu1 is the face-local horizontal extent, wy0→wy1 is the world Y extent
+  // Two faces are never visible while driving forward along +Z:
+  //   • Outer face (away from road): index 3 for right buildings, index 2 for left
+  //   • Forward face (+Z, facing the spawn direction): index 1 — always behind the player
+  const skipOuter = tierX > 0 ? 3 : (tierX < 0 ? 2 : -1);
   const faces = [
     { fw: tierW, place(fu0,fu1,wy0,wy1){
         const wz = b.z - tierD*0.5 - EPS;
@@ -1517,7 +1855,9 @@ function buildTierWindows(b, ch, tierX, tierY0, tierY1, tierW, tierD){
     }},
   ];
 
-  for(const face of faces){
+  for(let fi = 0; fi < faces.length; fi++){
+    if(fi === 1 || fi === skipOuter) continue; // skip forward (+Z) face and outer face
+    const face = faces[fi];
     const fW      = face.fw;
     const effWinW = fullWidth ? fW - 2.0 : winW;
     if(effWinW <= 0) continue;
@@ -1551,112 +1891,106 @@ function buildTierWindows(b, ch, tierX, tierY0, tierY1, tierW, tierD){
 
   if(posArr.length === 0) return;
 
+  if(wCol){
+    // Batch mode: add to chunk window collector, offset indices by current vertex count
+    const base = wCol.wv;
+    for(const v of posArr) wCol.wPos.push(v);
+    for(const c of colArr) wCol.wCol.push(c);
+    for(const idx of idxArr) wCol.wIdx.push(base/3 + idx);
+    wCol.wv += posArr.length;
+    return;
+  }
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(posArr), 3));
   geo.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(colArr), 3));
   geo.setIndex(idxArr);
   geo.computeVertexNormals();
-
   const mesh = new THREE.Mesh(geo, _winMat);
   mesh.frustumCulled = true;
   scene.add(mesh);
   ch._meshes.push(mesh);
 }
 
-function createBuildingMeshes(b, ch){
+function createBuildingMeshes(b, ch, _bC){
   const mat = getBuildingMaterial(b.style, b.neonCol);
+
+  // Neon color scaled ×5 for bloom (matching LineBasicMaterial behaviour)
+  const nc = b.neonCol;
+  const nr = nc[0]/255*5, ng = nc[1]/255*5, nb = nc[2]/255*5;
+  // Body color from palette
+  const [br, bg, bb] = _bldBodyRGB[b.style % _bldBodyRGB.length];
 
   function addTier(x, y0, y1, w, d){
     const hh = y1 - y0;
     if(hh <= 0 || w <= 0 || d <= 0) return;
     const isTopTier = (y1 === b.h);
+    const cy = y0 + hh*0.5;
+    const isCylinder = b.shapeType === 1 || b.shapeType === 2;
 
-    // Geometry and neon cap depend on shapeType
-    let geo, capGeo;
-    const r = Math.max(w, d) * 0.5;
-    if(b.shapeType === 1){
-      geo    = new THREE.CylinderGeometry(r, r, hh, 8);
-      capGeo = makeFramePolygon(r + 0.3, 8);
-    } else if(b.shapeType === 2){
-      geo    = new THREE.CylinderGeometry(r, r, hh, 14);
-      capGeo = makeFramePolygon(r + 0.3, 14);
-    } else {
-      geo    = new THREE.BoxGeometry(w, hh, d);
-      capGeo = makeFrameRect(w + 0.4, d + 0.4);
+    if(isCylinder){
+      // Keep individual meshes for cylinders, use Lambert
+      const r = Math.max(w, d) * 0.5;
+      const segments = b.shapeType === 1 ? 8 : 14;
+      const geo = new THREE.CylinderGeometry(r, r, hh, segments);
+      const mesh = new THREE.Mesh(geo, _bldCylMat);
+      mesh.position.set(x, cy, b.z);
+      mesh.frustumCulled = true;
+      scene.add(mesh); ch._meshes.push(mesh);
+      const capGeo = b.shapeType === 1 ? makeFramePolygon(r+0.3, 8) : makeFramePolygon(r+0.3, 14);
+      const cap = new THREE.LineSegments(capGeo, getFrameMaterial(b.neonCol));
+      cap.position.set(x, y1, b.z);
+      cap.frustumCulled = true;
+      scene.add(cap); ch._meshes.push(cap);
+      return;
     }
 
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(x, y0 + hh*0.5, b.z);
-    mesh.frustumCulled = true;
-    scene.add(mesh);
-    ch._meshes.push(mesh);
+    // Box-type: batch everything
+    _batchBox(_bC, x, cy, b.z, w, hh, d, br, bg, bb);
 
-    // Ground-tier base plate — thin slab wider than the building, anchors it to sidewalk
+    // Base plate
     if(y0 === 0 && b.glbIdx < 0){
-      const plateGeo  = new THREE.BoxGeometry(w + 1.2, 0.10, d + 1.2);
-      const plateMesh = new THREE.Mesh(plateGeo, mat);
-      plateMesh.position.set(x, 0.05, b.z);
-      plateMesh.frustumCulled = true;
-      scene.add(plateMesh);
-      ch._meshes.push(plateMesh);
+      _batchBox(_bC, x, 0.05, b.z, w+1.2, 0.10, d+1.2, br, bg, bb);
     }
 
-    // Top cap: neon frame
-    const cap = new THREE.LineSegments(capGeo, getFrameMaterial(b.neonCol));
-    cap.position.set(x, y1, b.z);
-    cap.frustumCulled = true;
-    scene.add(cap);
-    ch._meshes.push(cap);
+    // Neon rect cap
+    _batchCapRect(_bC, x, y1, b.z, w, d, nr, ng, nb);
 
-    // Windows only on box-type shapes (planar projection doesn't suit cylinders)
-    if(b.shapeType !== 1 && b.shapeType !== 2){
-      buildTierWindows(b, ch, x, y0, y1, w, d);
-    }
+    // Windows
+    buildTierWindows(b, ch, x, y0, y1, w, d, _bC);
 
     // ── LOW-COST DECORATIONS (box shapes only) ────────────────────────────────
 
     // Corner pillars — 4 thin vertical pylons at the tier corners (~50% of box buildings)
     if((b.shapeType < 3 || b.shapeType === 5 || b.shapeType >= 8) && fhash01(hash32(u32(b.winSeed ^ 0xCC11AA22))) < 0.50){
       const pW = 0.9;
-      const corners = [[-w*0.5, -d*0.5], [w*0.5, -d*0.5], [w*0.5, d*0.5], [-w*0.5, d*0.5]];
-      corners.forEach(([ox, oz]) => {
-        const pg = new THREE.BoxGeometry(pW, hh + 1.5, pW);
-        const pm = new THREE.Mesh(pg, mat);
-        pm.position.set(x + ox, y0 + hh*0.5, b.z + oz);
-        pm.frustumCulled = true;
-        scene.add(pm); ch._meshes.push(pm);
-      });
+      const corners = [[-w*.5,-d*.5],[w*.5,-d*.5],[w*.5,d*.5],[-w*.5,d*.5]];
+      for(const [ox,oz] of corners){
+        _batchBox(_bC, x+ox, cy, b.z+oz, pW, hh+1.5, pW, br, bg, bb);
+      }
     }
 
     // Facade ribs — horizontal bands extruding slightly beyond each face (~40%)
     if((b.shapeType < 3 || b.shapeType === 5 || b.shapeType >= 8) && hh > 14 && fhash01(hash32(u32(b.winSeed ^ 0xABCD1234))) < 0.40){
       const spacing = 9 + fhash01(hash32(u32(b.winSeed ^ 0x5678CDEF))) * 7;
       const ribH = 0.45, ribEx = 0.6;
-      for(let ry = y0 + spacing; ry < y1 - 2; ry += spacing){
-        const rg = new THREE.BoxGeometry(w + ribEx*2, ribH, d + ribEx*2);
-        const rm = new THREE.Mesh(rg, mat);
-        rm.position.set(x, ry, b.z);
-        rm.frustumCulled = true;
-        scene.add(rm); ch._meshes.push(rm);
+      for(let ry = y0+spacing; ry < y1-2; ry += spacing){
+        _batchBox(_bC, x, ry, b.z, w+ribEx*2, ribH, d+ribEx*2, br, bg, bb);
       }
     }
 
     // Rooftop machinery — 2–3 small boxes on the roof of the top tier (~55%)
     if(isTopTier && (b.shapeType < 3 || b.shapeType === 5 || b.shapeType >= 8) && fhash01(hash32(u32(b.winSeed ^ 0x99887766))) < 0.55){
       const nBoxes = fhash01(hash32(u32(b.winSeed ^ 0xF0E1D2C3))) < 0.4 ? 3 : 2;
-      for(let k = 0; k < nBoxes; k++){
-        const h1 = fhash01(hash32(u32(b.winSeed ^ u32(0x11223300 + k))));
-        const h2 = fhash01(hash32(u32(b.winSeed ^ u32(0x44556600 + k))));
-        const h3 = fhash01(hash32(u32(b.winSeed ^ u32(0x77889900 + k))));
-        const h4 = fhash01(hash32(u32(b.winSeed ^ u32(0xAABBCC00 + k))));
-        const mw = 2.5 + h1 * 4.5, md_ = 2.5 + h2 * 4.5, mh = 2.5 + h3 * 7.5;
-        const mx = x    + (h4 - 0.5) * w * 0.65;
-        const mz = b.z  + (fhash01(hash32(u32(b.winSeed ^ u32(0xDDEEFF00 + k)))) - 0.5) * d * 0.65;
-        const mg = new THREE.BoxGeometry(mw, mh, md_);
-        const mm = new THREE.Mesh(mg, mat);
-        mm.position.set(mx, y1 + mh*0.5, mz);
-        mm.frustumCulled = true;
-        scene.add(mm); ch._meshes.push(mm);
+      for(let k=0; k<nBoxes; k++){
+        const h1=fhash01(hash32(u32(b.winSeed^u32(0x11223300+k))));
+        const h2=fhash01(hash32(u32(b.winSeed^u32(0x44556600+k))));
+        const h3=fhash01(hash32(u32(b.winSeed^u32(0x77889900+k))));
+        const h4=fhash01(hash32(u32(b.winSeed^u32(0xAABBCC00+k))));
+        const mw=2.5+h1*4.5, md_=2.5+h2*4.5, mh=2.5+h3*7.5;
+        const mx=x+(h4-0.5)*w*0.65;
+        const mz=b.z+(fhash01(hash32(u32(b.winSeed^u32(0xDDEEFF00+k))))-0.5)*d*0.65;
+        _batchBox(_bC, mx, y1+mh*.5, mz, mw, mh, md_, br, bg, bb);
       }
     }
   }
@@ -1875,6 +2209,20 @@ function createBuildingMeshes(b, ch){
     addTier(b.x,               0,          b.h * 0.45, b.w * 0.22, b.d * 0.60);  // centre leg
     addTier(b.x,               b.h * 0.45, b.h,        b.w,        b.d);          // unified body above
 
+  } else if(b.shapeType === 34){
+    // ── Utility shed: flat 1-floor body + rooftop machinery cluster ──
+    addTier(b.x, 0, b.h, b.w, b.d);
+    const mrng  = makeRng(b.winSeed ^ 0xF00DCAFE);
+    const count = mrng.irange(3, 7);
+    for(let m = 0; m < count; m++){
+      const mw = mrng.range(1.2, Math.min(4.5, b.w * 0.48));
+      const md = mrng.range(1.2, Math.min(4.5, b.d * 0.48));
+      const mh = mrng.range(1.5, 5.5);
+      const mx = b.x + mrng.range(-b.w * 0.38, b.w * 0.38);
+      _batchBox(_bC, mx, b.h + mh * 0.5, b.z, mw, mh, md, br, bg, bb);
+      _batchCapRect(_bC, mx, b.h + mh, b.z, mw, md, nr, ng, nb);
+    }
+
   } else {
     // ── Standard: box, octagonal, or cylindrical ──
     addTier(b.x, 0, mainY1, b.w, b.d);
@@ -1890,7 +2238,7 @@ function createBuildingMeshes(b, ch){
   if(b.glbIdx < 0 && (b.shapeType < 3 || b.shapeType === 5 || b.shapeType >= 8) && fhash01(hash32(u32(b.winSeed ^ 0x7F8E9D0C))) < 0.30){
     const spireH = 8 + fhash01(hash32(u32(b.winSeed ^ 0x1B2C3D4E))) * 22;
     const spireGeo = new THREE.CylinderGeometry(0, 0.45, spireH, 5);
-    const spMesh = new THREE.Mesh(spireGeo, mat);
+    const spMesh = new THREE.Mesh(spireGeo, _bldCylMat);
     spMesh.position.set(b.x, b.h + spireH * 0.5, b.z);
     spMesh.frustumCulled = true;
     scene.add(spMesh); ch._meshes.push(spMesh);
@@ -1945,30 +2293,46 @@ function placeBuildingGlb(b, ch){
   b._glbMesh = clone;
 }
 
-function createLampMesh(lm, ch){
-  const col = neonColor(lm.col);
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x080808,
-    emissive: col,
-    emissiveIntensity: 1.2,
-    roughness: 0.7
-  });
+function createLampMesh(lm, ch, _bC){
+  // Pole → dedicated pole batch (keeps building body batch clean)
+  const poleH = lm.top - lm.y;
+  const cx = lm.x, cy = lm.y + poleH * 0.5, cz = lm.z;
+  const hw = 0.15, hh = poleH * 0.5, hd = 0.15;
+  const plv = _bC.plv;
+  _bC.plPos.push(
+    cx-hw,cy-hh,cz-hd, cx+hw,cy-hh,cz-hd, cx+hw,cy+hh,cz-hd, cx-hw,cy+hh,cz-hd,
+    cx-hw,cy-hh,cz+hd, cx+hw,cy-hh,cz+hd, cx+hw,cy+hh,cz+hd, cx-hw,cy+hh,cz+hd
+  );
+  _bC.plIdx.push(
+    plv,plv+2,plv+1, plv,plv+3,plv+2,
+    plv+5,plv+7,plv+4, plv+5,plv+6,plv+7,
+    plv+4,plv+3,plv, plv+4,plv+7,plv+3,
+    plv+1,plv+6,plv+5, plv+1,plv+2,plv+6,
+    plv+4,plv+1,plv+5, plv+4,plv,plv+1,
+    plv+3,plv+6,plv+2, plv+3,plv+7,plv+6
+  );
+  _bC.plv += 8;
 
-  // Pole — dark gray, no emissive
-  const poleMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.85, metalness: 0.15 });
-  const poleGeo = new THREE.BoxGeometry(0.3, lm.top - lm.y, 0.3);
-  const pole = new THREE.Mesh(poleGeo, poleMat);
-  pole.position.set(lm.x, (lm.y + lm.top)*0.5, lm.z);
-  pole.userData.ownsMaterial = true;  // dispose poleMat with chunk
-  scene.add(pole);
-  ch._meshes.push(pole);
-
-  // Head (lamp body)
-  const headGeo = new THREE.BoxGeometry(0.9, 0.35, 0.9);
-  const head = new THREE.Mesh(headGeo, mat);
-  head.position.set(lm.x, lm.top, lm.z);
-  scene.add(head);
-  ch._meshes.push(head);
+  // Head → head batch (neon vertex colour; MeshBasicMaterial = emissive-equivalent for bloom)
+  const c = lm.col;
+  const r = c[0]/255, g = c[1]/255, b = c[2]/255;
+  const v0 = _bC.hv;
+  const x = lm.x, y = lm.top, z = lm.z;
+  const hhw = 0.45, hhh = 0.175, hhd = 0.45;
+  _bC.hPos.push(
+    x-hhw,y-hhh,z-hhd, x+hhw,y-hhh,z-hhd, x+hhw,y+hhh,z-hhd, x-hhw,y+hhh,z-hhd,
+    x-hhw,y-hhh,z+hhd, x+hhw,y-hhh,z+hhd, x+hhw,y+hhh,z+hhd, x-hhw,y+hhh,z+hhd
+  );
+  for(let i=0;i<8;i++) _bC.hCol.push(r,g,b);
+  _bC.hIdx.push(
+    v0,v0+2,v0+1, v0,v0+3,v0+2,
+    v0+5,v0+7,v0+4, v0+5,v0+6,v0+7,
+    v0+4,v0+3,v0, v0+4,v0+7,v0+3,
+    v0+1,v0+6,v0+5, v0+1,v0+2,v0+6,
+    v0+4,v0+1,v0+5, v0+4,v0,v0+1,
+    v0+3,v0+6,v0+2, v0+3,v0+7,v0+6
+  );
+  _bC.hv += 8;
 }
 
 function createDroneMesh(dr, ch){
@@ -2008,7 +2372,7 @@ function disposeChunkMeshes(ch){
 function recycleChunks(){
   const preset = currentPreset();
   const viewStart = cam.z - 80;
-  const viewEnd   = cam.z + WORLD.far;
+  const viewEnd   = cam.z + WORLD.far * 1.1;
 
   while(chunks.length && chunks[0].z1 < viewStart){
     const old = chunks.shift();
@@ -2282,7 +2646,7 @@ const _gcPool  = [];  // THREE.Group per ground car slot
 const _gcMAX   = 104;
 // Flying car pool
 const _fcPool  = [];
-const _fcMAX   = 198;
+const _fcMAX   = 350;
 
 // Ground car mesh group: body + headlight + taillight
 const gcBodyGeo  = new THREE.BoxGeometry(1, 1, 1); // scaled per car
@@ -2335,6 +2699,11 @@ for(let i = 0; i < _fcMAX; i++){
   const engR = new THREE.Mesh(fcEngGeo, engMatR);
   engR.position.set(1.1, -0.3, 0.5);
   g.add(engR);
+  // Mono-red light (mode 2): single slightly-larger red orb, hidden by default
+  const monoMat = new THREE.MeshStandardMaterial({ color:0x110000, emissive:new THREE.Color(1,0,0), emissiveIntensity:3.5 });
+  const monoMesh = new THREE.Mesh(new THREE.SphereGeometry(0.75, 6, 4), monoMat);
+  monoMesh.visible = false;
+  g.add(monoMesh);
   scene.add(g);
   _fcPool.push(g);
 }
@@ -2343,7 +2712,7 @@ function makeGroundCar(){
   return { active:false, lane:0, laneT:1, laneFrom:0, laneTo:0, z:0, speed:0, len:5, w:2, blink:0, model:0 };
 }
 function makeFlyingCar(){
-  return { active:false, z:0, speed:0, baseAlt:0, off:0, ampX:0, ampY:0, fx:0, fy:0, ph:0, col:neon[0], col2:neon[1] };
+  return { active:false, z:0, speed:0, baseAlt:0, off:0, ampX:0, ampY:0, fx:0, fy:0, ph:0, col:neon[0], col2:neon[1], lightMode:0, _prevMode:-1 };
 }
 function makeRobot(){
   return { active:false, dir:1, z:0, vz:0, off:0, y:0, modelIdx:0, ph:0, bobAmp:0, bobFreq:0, col:neon[0], _mesh:null };
@@ -2373,11 +2742,22 @@ function initFlyingCar(f, z){
   f.off = rng.range(-WORLD.roadGap*2.2, WORLD.roadGap*2.2);
   f.ampX = rng.range(6, 28);
   f.ampY = rng.range(3, 14);
+  // Inner building row spans roughly 35–95u from road spine, max height ~110u.
+  // Ensure flying lights clear rooftops when their lateral offset puts them over that band.
+  const bldInner = WORLD.roadWidth * 0.5 + WORLD.sidewalk + 8;  // ~25u — start of building zone
+  const bldOuter = bldInner + 70;                                // ~95u — outer edge of inner row
+  if(Math.abs(f.off) > bldInner && Math.abs(f.off) < bldOuter){
+    f.baseAlt = Math.max(f.baseAlt, 120);
+    f.ampY    = Math.min(f.ampY, 6);   // also dampen vertical bob so they don't dip back down
+  }
   f.fx = rng.range(0.003, 0.010);
   f.fy = rng.range(0.004, 0.013);
   f.ph = rng.range(0, TAU);
   f.col  = neon[rng.irange(0, neon.length-1)];
   f.col2 = neon[rng.irange(0, neon.length-1)];
+  const modeRoll = rng.next();
+  f.lightMode = modeRoll < 0.33 ? 0 : modeRoll < 0.66 ? 1 : 2; // 0=neon, 1=dual-red, 2=mono-red
+  f._prevMode = -1; // force pool material refresh
 }
 
 // Robot columns — all within the road air corridor (±35 units from spine).
@@ -2400,8 +2780,8 @@ function initRobot(r){
   const zone  = zRoll < 0.36 ? 0 : zRoll < 0.40 ? 1 : zRoll < 0.75 ? 2 : 3;
   if(zone === 0)      r.y = rng.range(10, 26);
   else if(zone === 1) r.y = rng.range(48, 78);
-  else if(zone === 2) r.y = rng.range(115, 350);
-  else                r.y = rng.range(350, 960);
+  else if(zone === 2) r.y = rng.range(115, 260);
+  else                r.y = rng.range(115, 260);  // fusionné — max = buildings × 1.05
   r.bobAmp = r.y < 30 ? rng.range(0.1, 0.8) : rng.range(1.0, 7);
 
   // ── Direction ────────────────────────────────────────────────────────────
@@ -2493,12 +2873,24 @@ function resetTraffic(){
 
   groundCars = new Array(maxG);
   for(let i=0;i<maxG;i++) groundCars[i] = makeGroundCar();
-  flyingCars = new Array(maxF);
-  for(let i=0;i<maxF;i++) flyingCars[i] = makeFlyingCar();
-  robots = new Array(maxF);
-  for(let i=0;i<maxF;i++) robots[i] = makeRobot();
+  const maxFCap = Math.min(maxF, _fcMAX); // cap to render pool size
+  flyingCars = new Array(maxFCap);
+  for(let i=0;i<maxFCap;i++) flyingCars[i] = makeFlyingCar();
+  const maxRobots = qualityPresets[QUALITY.HIGH].maxRobots; // always HIGH capacity
+  robots = new Array(maxRobots);
+  for(let i=0;i<maxRobots;i++) robots[i] = makeRobot();
 
   spawnTraffic(true);
+
+  // Pre-seed all robots in front of the camera so traffic is visible immediately at load.
+  // Override the z that initRobot just assigned — keep everything else (zone, speed, col…).
+  const visRange = lerp(400, WORLD.far * 0.85, config.fog);
+  for(let i = 0; i < robots.length; i++){
+    const r = robots[i];
+    if(!r.active) continue;
+    // Spread evenly across the forward visible range so all distances are covered
+    r.z = cam.z + 10 + (i / Math.max(robots.length - 1, 1)) * (visRange - 10);
+  }
 }
 
 function spawnTraffic(force){
@@ -2526,9 +2918,8 @@ function spawnTraffic(force){
     if(flyingCars[i].active && flyingCars[i].z < cam.z + WORLD.far*0.7){ flyingCars[i].active=false; activeF--; }
   }
 
-  // Robots cover all traffic layers — count scales continuously with trafficBudget.
-  // Budget 0 → 15% of max, budget 1 → 90% of max.
-  const robotN = Math.floor(preset.maxFlyingCars * lerp(0.15, 0.90, trafficBudget));
+  // Robots: traffic slider is a direct ceiling — user controls this explicitly.
+  const robotN = Math.floor(qualityPresets[QUALITY.HIGH].maxRobots * clamp(config.traffic, 0, 1));
   let activeR = 0;
   for(let i=0;i<robots.length;i++) if(robots[i].active) activeR++;
   if(force){ for(let i=0;i<robots.length;i++) robots[i].active=false; activeR=0; }
@@ -2623,26 +3014,35 @@ function updateParticles(dt){
   for(let j=vi; j<particles.length; j++){
     posAttr.array[j*3] = 0; posAttr.array[j*3+1] = -9999; posAttr.array[j*3+2] = 0;
   }
-  posAttr.needsUpdate = true;
-  particleMesh.visible = config.particles > 0.001;
+  if(vi > 0) posAttr.needsUpdate = true;
+  particleMesh.visible = vi > 0 && config.particles > 0.001;
 }
 
 /* =========================
    FPS + Auto Quality
 ========================= */
 let fps = 60, fpsAvg = 60, fpsAcc = 0, fpsFrames = 0, fpsTimer = 0;
+let _realLast = 0; // wall-clock timestamp for true FPS — NOT clamped like dt
+let _hudCountR = 0, _hudCountP = 0;
 // Continuous traffic budget: 0 (starved) → 1 (full).
 // Rises slowly when FPS is good, falls quickly when FPS drops.
 let trafficBudget = 0.8;
 
 function updateFps(dt){
-  fpsTimer += dt;
-  fpsAcc += 1 / Math.max(0.00001, dt);
+  const realNow = now();
+  const realDt  = _realLast > 0 ? (realNow - _realLast) / 1000 : dt;
+  _realLast = realNow;
+  fpsTimer += realDt;
+  fpsAcc += 1 / Math.max(0.001, realDt); // unclamped — shows true frame time
   fpsFrames++;
   if(fpsTimer >= 0.25){
     fps    = fpsAcc / fpsFrames;
     fpsAvg = lerp(fpsAvg, fps, 0.25);  // faster reaction than before
     fpsAcc = 0; fpsFrames = 0; fpsTimer = 0;
+    const msPerFrame = fpsAvg > 0 ? (1000 / fpsAvg).toFixed(1) : '--';
+    fpsCorner.textContent = fpsAvg.toFixed(0) + ' fps  ' + msPerFrame + 'ms';
+    _hudCountR = robots.reduce((n,r)=>n+(r.active?1:0),0);
+    _hudCountP = particles.reduce((n,p)=>n+(p.active?1:0),0);
 
     if(config.qualityMode === QUALITY.AUTO){
       // Map fpsAvg to a 0-1 score: 0 at ≤20fps, 1 at ≥60fps
@@ -2769,7 +3169,32 @@ function updateFlyingCarPool(){
     const fx = spineXC(f.z) + f.off + Math.sin(tAccum*f.fx + f.ph) * f.ampX;
     const fy = f.baseAlt + Math.sin(tAccum*f.fy + f.ph*1.3) * f.ampY;
     g.position.set(fx, fy, f.z);
-    // Update engine glow colors each cycle (cheap: only update emissive color occasionally)
+    // Apply light mode only when it changed (e.g. after initFlyingCar)
+    if(f._prevMode !== f.lightMode){
+      f._prevMode = f.lightMode;
+      const body = g.children[0];
+      const eL   = g.children[1];
+      const eR   = g.children[2];
+      const mono = g.children[3];
+      if(f.lightMode === 0){
+        // Neon dual lights
+        body.visible = true; eL.visible = true; eR.visible = true; mono.visible = false;
+        eL.material.emissive.copy(neonColor(f.col));
+        eR.material.emissive.copy(neonColor(f.col2));
+        eL.material.emissiveIntensity = 2.2;
+        eR.material.emissiveIntensity = 2.2;
+      } else if(f.lightMode === 1){
+        // Dual red lights
+        body.visible = true; eL.visible = true; eR.visible = true; mono.visible = false;
+        eL.material.emissive.setRGB(1, 0.02, 0.02);
+        eR.material.emissive.setRGB(1, 0.02, 0.02);
+        eL.material.emissiveIntensity = 2.5;
+        eR.material.emissiveIntensity = 2.5;
+      } else {
+        // Single mono red orb — body and dual engines hidden
+        body.visible = false; eL.visible = false; eR.visible = false; mono.visible = true;
+      }
+    }
     g.visible = true;
   }
   for(let i = flyingCars.length; i < _fcMAX; i++){
@@ -2792,10 +3217,12 @@ function updateDrones(){
 ========================= */
 let last = now();
 
+let _frameCount = 0;
 function frame(){
   const t = now();
   let dt = clamp((t - last) / 1000, 0.001, 0.045);
   last = t;
+  _frameCount++;
 
   if(!config.paused){
     _spineCache.clear();
@@ -2811,6 +3238,7 @@ function frame(){
   camera.rotation.z = cam.roll;
 
   // Update bloom + fog (max strength 0.85 — neon glow without whiteout)
+  bloomPass.enabled  = config.bloom > 0.005;
   bloomPass.strength = config.bloom * 0.85;
   const fogFar = lerp(400, WORLD.far * 0.9, config.fog);
   scene.fog.far = fogFar;
@@ -2826,11 +3254,7 @@ function frame(){
   ground.position.z = cam.z;
 
   // Move stars with camera (so they're always around us)
-  for(const obj of scene.children){
-    if(obj.userData && obj.userData.isStars){
-      obj.position.set(cam.x, 0, cam.z);
-    }
-  }
+  _starsMesh.position.set(cam.x, 0, cam.z);
 
   // Neon fill lights orbit camera to simulate environmental neon bounce
   neonFillA.position.set(cam.x - 18, cam.y + 8, cam.z + 10);
@@ -2859,16 +3283,20 @@ function frame(){
   // Background city silhouette ring follows camera XZ
   bgCity.front.position.set(cam.x, 0, cam.z);
   bgCity.side.position.set(cam.x, 0, cam.z);
+  bgFwd.front.position.set(cam.x, 0, cam.z);
+  bgFwd.side.position.set(cam.x, 0, cam.z);
 
 
   updateRobotPool();
   updateFlyingCarPool();
   updateDrones();
 
-  // Antenna blink lights — brief red flash every ~2 s, staggered by phase
-  for(const light of _antennaLights){
-    const t = (tAccum * 0.5 + light.userData.blinkPhase) % 1.0;
-    light.material.emissiveIntensity = t < 0.055 ? 9.0 : 0.0;
+  // Antenna blink lights — throttled to every 3rd frame (imperceptible at 60fps, ~2s blink period)
+  if((_frameCount % 3) === 0){
+    for(const light of _antennaLights){
+      const t = (tAccum * 0.5 + light.userData.blinkPhase) % 1.0;
+      light.material.emissiveIntensity = t < 0.055 ? 9.0 : 0.0;
+    }
   }
 
   updateFps(dt);
@@ -2877,8 +3305,8 @@ function frame(){
     const modeLabel = (config.qualityMode === QUALITY.AUTO)
       ? ("AUTO/" + (config.qualityStep===QUALITY.HIGH?"HIGH":config.qualityStep===QUALITY.MED?"MED":"LOW"))
       : (config.qualityMode===QUALITY.HIGH?"HIGH":config.qualityMode===QUALITY.MED?"MED":"LOW");
-    const countR = robots.reduce((n,r)=>n+(r.active?1:0),0);
-    const countP = particles.reduce((n,p)=>n+(p.active?1:0),0);
+    const countR = _hudCountR;
+    const countP = _hudCountP;
     hud.innerHTML =
       `<div>FPS: <b>${fpsAvg.toFixed(1)}</b> <span class="small">(inst ${fps.toFixed(1)})</span></div>` +
       `<div>Quality: <b>${modeLabel}</b></div>` +
